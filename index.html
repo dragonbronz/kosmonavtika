@@ -176,101 +176,136 @@ html,body{width:100%;height:100%;overflow:hidden;background:#020818;font-family:
 <script>
 'use strict';
 // ═══════════════════════════════════════════
-// КОНФИГУРАЦИЯ СЕРВЕРА — поменяй URL на свой!
-// Render.com даёт бесплатный сервер
+// КОНФИГУРАЦИЯ — ВСТАВЬ СВОЙ URL СЕРВЕРА
 // ═══════════════════════════════════════════
-const SERVER_URL = 'https://kosmonavtika-server.onrender.com'; // ← ЗАМЕНИТЬ
-const SYNC_INTERVAL = 30000; // синхронизация каждые 30 секунд
+const SERVER_URL = 'https://kosmonavtika-server.onrender.com'; // ← твой реальный URL
+const SYNC_INTERVAL = 30000; // сохранять на сервер каждые 30 сек
+const SAVE_KEY = 'kosmonavtika_save_v1'; // ключ localStorage
 
-// ── Telegram SDK инициализация ───────────────
+// ── Telegram SDK ──────────────────────────────────────────
 const TG = window.Telegram?.WebApp;
-if (TG) {
-  TG.ready();           // сообщаем что Mini App загружено
-  TG.expand();          // раскрыть на весь экран
-}
-// Получаем данные пользователя из Telegram
-const TG_USER = TG?.initDataUnsafe?.user || null;
-const PLAYER_ID = TG_USER?.id?.toString() || ('guest_' + Math.random().toString(36).slice(2,8));
-const PLAYER_NAME = TG_USER ? (TG_USER.first_name + (TG_USER.last_name ? ' '+TG_USER.last_name : '')) : 'Гость';
-const PLAYER_AVATAR = TG_USER?.photo_url || null;
+if (TG) { TG.ready(); TG.expand(); }
+const TG_USER    = TG?.initDataUnsafe?.user || null;
+const PLAYER_ID  = TG_USER?.id?.toString()
+                 || localStorage.getItem('kosmo_pid')
+                 || (() => { const id='guest_'+Math.random().toString(36).slice(2,8); localStorage.setItem('kosmo_pid',id); return id; })();
+const PLAYER_NAME= TG_USER
+                 ? (TG_USER.first_name+(TG_USER.last_name?' '+TG_USER.last_name:''))
+                 : (localStorage.getItem('kosmo_name')||'Игрок');
 
-// ── Серверные функции ────────────────────────
-async function syncToServer() {
-  if (!G.nat || SERVER_URL.includes('kosmonavtika-server')) return; // не синкаем пока нет реального сервера
+// ── Сохранение в localStorage ─────────────────────────────
+function localSave() {
+  if (!G.nat) return;
   try {
-    const totalRes = Object.values(G.res).reduce((a,b)=>a+b,0);
-    await fetch(SERVER_URL + '/save', {
-      method: 'POST',
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      nat_id:    G.nat.id,
+      res:       G.res,
+      bldgs:     G.bldgs,
+      spawn:     G.spawn,
+      saved_at:  Date.now()
+    }));
+  } catch(e) { console.warn('localStorage save failed', e); }
+}
+
+function localLoad() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    // Не грузим сохранение старше 7 дней
+    if (Date.now() - data.saved_at > 7*24*3600*1000) {
+      localStorage.removeItem(SAVE_KEY); return null;
+    }
+    return data;
+  } catch(e) { return null; }
+}
+
+// ── Синхронизация с сервером ──────────────────────────────
+async function syncToServer() {
+  if (!G.nat) return;
+  // Сначала сохраняем локально
+  localSave();
+  // Затем на сервер
+  try {
+    const totalRes = Math.floor(Object.values(G.res).reduce((a,b)=>a+(b||0),0));
+    const resp = await fetch(SERVER_URL + '/save', {
+      method:  'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
-        player_id: PLAYER_ID,
-        player_name: PLAYER_NAME,
-        nation: G.nat?.id,
-        resources: G.res,
-        buildings: G.bldgs.filter(b=>b.nation===G.nat?.id).length,
-        total_resources: Math.floor(totalRes),
-        timestamp: Date.now()
+        player_id:       PLAYER_ID,
+        player_name:     PLAYER_NAME,
+        nation:          G.nat.id,
+        resources:       G.res,
+        buildings:       G.bldgs.filter(b=>b.nation===G.nat.id).length,
+        total_resources: totalRes
       })
     });
-  } catch(e) { /* сервер недоступен — продолжаем в офлайн режиме */ }
+    if (resp.ok) {
+      // Показываем маленький индикатор сохранения
+      const dot = document.querySelector('#ht');
+      if (dot) { dot.style.color='#4DFFB0'; setTimeout(()=>dot.style.color='',800); }
+    }
+  } catch(e) { /* офлайн — данные уже в localStorage */ }
+}
+
+// ── Таблица лидеров ───────────────────────────────────────
+function toggleLeaderboard() {
+  const lb = document.getElementById('lboard');
+  const open = lb.style.display === 'none';
+  lb.style.display = open ? 'block' : 'none';
+  if (open) loadLeaderboard();
 }
 
 async function loadLeaderboard() {
   const el = document.getElementById('lboard_list');
   if (!el) return;
-  el.innerHTML = '<div style="color:rgba(125,211,252,.4)">Загрузка...</div>';
-  // Если сервер не настроен — показываем демо
-  if (SERVER_URL.includes('kosmonavtika-server')) {
-    el.innerHTML = renderDemoLeaderboard();
-    return;
-  }
+  el.innerHTML = '<div style="color:rgba(125,211,252,.4);padding:8px 0">Загрузка...</div>';
   try {
     const r = await fetch(SERVER_URL + '/leaderboard?limit=20');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
-    el.innerHTML = renderLeaderboard(data.players || []);
+    el.innerHTML = renderLeaderboard(data.players || [], data.total || 0);
   } catch(e) {
-    el.innerHTML = '<div style="color:rgba(255,100,100,.6)">Сервер недоступен — режим офлайн</div>' + renderDemoLeaderboard();
+    // Сервер спит (Render free tier) или нет сети
+    el.innerHTML =
+      `<div style="color:rgba(255,180,60,.7);font-size:8px;margin-bottom:6px">⏳ Сервер просыпается (~30 сек), попробуй снова</div>` +
+      renderDemoLeaderboard();
   }
 }
 
-function renderLeaderboard(players) {
-  if (!players.length) return '<div style="color:rgba(125,211,252,.35)">Список пуст — будь первым!</div>';
+function renderLeaderboard(players, total) {
+  if (!players.length) return '<div style="color:rgba(125,211,252,.35);padding:8px 0">Список пуст — сыграй первым! 🚀</div>';
   const medals = ['🥇','🥈','🥉'];
-  return players.map((p,i) => {
+  const header = `<div style="font-size:7px;color:rgba(125,211,252,.35);margin-bottom:6px">Всего игроков: ${total}</div>`;
+  return header + players.map((p,i) => {
     const isMe = p.player_id === PLAYER_ID;
-    const nat = NATIONS.find(n=>n.id===p.nation);
-    return `<div style="display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid rgba(125,211,252,.07);${isMe?'background:rgba(125,211,252,.06);border-radius:5px;padding:5px 5px;':''}">
-      <div style="width:22px;font-size:13px;text-align:center">${medals[i]||('#'+(i+1))}</div>
-      <div style="font-size:14px">${nat?.flag||'🌍'}</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:9px;color:${isMe?'#7DD3FC':'#E0F2FF'};font-weight:${isMe?'700':'400'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.player_name}${isMe?' (ты)':''}</div>
-        <div style="font-size:7px;color:rgba(125,211,252,.4)">${nat?.name||''} · ${p.buildings||0} зданий</div>
+    const nat  = NATIONS?.find(n=>n.id===p.nation);
+    return `<div style="display:flex;align-items:center;gap:7px;padding:5px 4px;border-bottom:1px solid rgba(125,211,252,.07);border-radius:5px;${isMe?'background:rgba(125,211,252,.08);':''}">
+      <div style="width:20px;font-size:12px;text-align:center;flex-shrink:0">${medals[i]||(i+1)}</div>
+      <div style="font-size:13px;flex-shrink:0">${nat?.flag||'🌍'}</div>
+      <div style="flex:1;min-width:0;overflow:hidden">
+        <div style="font-size:9px;color:${isMe?'#7DD3FC':'#E0F2FF'};font-weight:${isMe?700:400};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.player_name||'?'}${isMe?' ◀ ты':''}</div>
+        <div style="font-size:7px;color:rgba(125,211,252,.38)">${nat?.name||p.nation} · ${p.buildings||0} зданий</div>
       </div>
       <div style="text-align:right;flex-shrink:0">
-        <div style="font-size:10px;color:#FFD700;font-weight:700">${(p.total_resources||0).toLocaleString()}</div>
-        <div style="font-size:6px;color:rgba(125,211,252,.35)">ресурсов</div>
+        <div style="font-size:10px;color:#FFD700;font-weight:700">${(p.total_resources||0).toLocaleString('ru')}</div>
+        <div style="font-size:6px;color:rgba(125,211,252,.3)">ресурсов</div>
       </div>
     </div>`;
   }).join('');
 }
 
 function renderDemoLeaderboard() {
+  const myRes = G.res ? Math.floor(Object.values(G.res).reduce((a,b)=>a+(b||0),0)) : 0;
   const demo = [
-    {player_name:'Иван К.',         nation:'ru', total_resources:48200, buildings:12},
-    {player_name:'Wang Wei',        nation:'cn', total_resources:41500, buildings:10},
-    {player_name:'John Smith',      nation:'us', total_resources:38900, buildings:9},
-    {player_name:'Алексей П.',      nation:'by', total_resources:29300, buildings:8},
-    {player_name:'UN_Commander',    nation:'un', total_resources:22100, buildings:6},
-    {player_name:PLAYER_NAME,       nation:G.nat?.id||'ru', total_resources:Math.floor(Object.values(G.res||{}).reduce((a,b)=>a+b,0)), buildings:G.bldgs?.filter(b=>b.nation===G.nat?.id).length||3},
-  ].sort((a,b)=>b.total_resources-a.total_resources).map((p,i)=>({...p,player_id:p.player_name===PLAYER_NAME?PLAYER_ID:'other'+i}));
-  return '<div style="font-size:7px;color:rgba(255,200,100,.5);margin-bottom:6px">⚠ ДЕМО — подключи сервер для реального лидерборда</div>' + renderLeaderboard(demo);
-}
-
-function toggleLeaderboard() {
-  const lb = document.getElementById('lboard');
-  const open = lb.style.display === 'none';
-  lb.style.display = open ? 'block' : 'none';
-  if (open) loadLeaderboard();
+    {player_id:'d1',player_name:'Иван К.',      nation:'ru',total_resources:48200,buildings:12},
+    {player_id:'d2',player_name:'Wang Wei',     nation:'cn',total_resources:41500,buildings:10},
+    {player_id:'d3',player_name:'John Smith',   nation:'us',total_resources:38900,buildings:9},
+    {player_id:'d4',player_name:'Алексей П.',   nation:'by',total_resources:29300,buildings:8},
+    {player_id:'d5',player_name:'UN_Commander', nation:'un',total_resources:22100,buildings:6},
+    {player_id:PLAYER_ID,player_name:PLAYER_NAME,nation:G.nat?.id||'ru',total_resources:myRes,buildings:G.bldgs?.filter(b=>b.nation===G.nat?.id).length||0},
+  ].sort((a,b)=>b.total_resources-a.total_resources);
+  return renderLeaderboard(demo, demo.length);
 }
 
 // ═══════════════════════════════════════════
@@ -857,6 +892,25 @@ function renderBuildHL(){
 // INIT GAME
 // ═══════════════════════════════════════════
 function initGame(){
+  // ── Проверяем сохранение — если нация та же, восстанавливаем прогресс ──
+  const saved = localLoad();
+  if (saved && saved.nat_id === G.nat.id) {
+    G.res   = saved.res   || G.res;
+    G.bldgs = saved.bldgs || [];
+    G.spawn = saved.spawn || G.spawn;
+    // Если есть здания — не генерируем заново карту и базу
+    if (G.bldgs.length > 0) {
+      G.map = genMap(); initNoise();
+      document.getElementById('sla').classList.add('off');
+      document.getElementById('sg').classList.remove('off');
+      setupCanvas();setupHUD();setupBuildBtns();setupInput();
+      centerOn(G.spawn.x, G.spawn.y);
+      notif('💾 Прогресс восстановлен!');
+      syncToServer();
+      startLoop();
+      return;
+    }
+  }
   G.map=genMap();initNoise();
   const a=G.nat.sa*Math.PI/180,d=54;
   const rawX=Math.round(MAP/2+Math.cos(a)*d),rawY=Math.round(MAP/2+Math.sin(a)*d);
@@ -880,6 +934,8 @@ function initGame(){
   document.getElementById('sg').classList.remove('off');
   setupCanvas();setupHUD();setupBuildBtns();setupInput();
   centerOn(G.spawn.x,G.spawn.y);
+  // Первая синхронизация сразу при старте
+  syncToServer();
   startLoop();
 }
 function centerOn(tx,ty){
@@ -964,6 +1020,7 @@ function upgradeBldg(){
   b.lv=(b.lv||1)+1;
   b.maxHp=Math.round(def.maxHp*(1+(b.lv-1)*.3));b.hp=b.maxHp;
   notif('▲ '+def.name+' → Уровень '+b.lv);
+  localSave();
   showBldgInfo(b);
 }
 
@@ -1010,12 +1067,13 @@ function placeBldg(tx,ty,id){
   for(const[k,v]of Object.entries(def.cost))G.res[k]=(G.res[k]||0)-v;
   G.bldgs.push({tx,ty,id,nation:G.nat.id,hp:def.maxHp,maxHp:def.maxHp,lv:1,progress:0,built:false,buildEnd:Date.now()+def.time*1000});
   notif('🏗 '+def.name+' ('+def.time+'с)');
+  localSave();
 }
 
 // ═══════════════════════════════════════════
 // GAME LOOP
 // ═══════════════════════════════════════════
-let lastRes=0,lastSync=0;
+let lastRes=0,lastSync=0,lastLocal=0;
 function startLoop(){requestAnimationFrame(loop);}
 function loop(ts){
   if(ts-lastRes>2000){
@@ -1028,6 +1086,8 @@ function loop(ts){
     });
     lastRes=ts;updateHUD();
   }
+  // Локальное сохранение каждые 10 секунд
+  if(ts-lastLocal>10000){lastLocal=ts;localSave();}
   // Синхронизация с сервером каждые 30 секунд
   if(ts-lastSync>SYNC_INTERVAL){lastSync=ts;syncToServer();}
   G.bldgs.forEach(b=>{
